@@ -529,6 +529,29 @@ public:
     // Example values: "lowlight,hdr".
     static const char KEY_LIGHTFX[];
 
+#ifdef LG_CAMERA_HARDWARE
+    static const char AUDIO_ZOOM_OFF[];
+    static const char AUDIO_ZOOM_ON[];
+    static const char BEAUTY_SHOT_OFF[];
+    static const char BEAUTY_SHOT_ON[];
+    static const char BURST_SHOT_OFF[];
+    static const char BURST_SHOT_ON[];
+    static const char KEY_AUDIO_ZOOM[];
+    static const char KEY_AUDIO_ZOOM_SUPPORTED[];
+    static const char KEY_BEAUTY_SHOT[];
+    static const char KEY_BEAUTY_SHOT_SUPPORTED[];
+    static const char KEY_BURST_SHOT[];
+    static const char KEY_BURST_SHOT_SUPPORTED[];
+    static const char KEY_FOCUS_MODE_OBJECT_TRACKING[];
+    static const char KEY_FOCUS_MODE_OBJECT_TRACKING_SUPPORTED[];
+    static const char KEY_VIDEO_WDR[];
+    static const char KEY_VIDEO_WDR_SUPPORTED[];
+    static const char VIDEO_WDR_OFF[];
+    static const char VIDEO_WDR_ON[];
+    static const char OBJECT_TRACKING_ON[];
+    static const char OBJECT_TRACKING_OFF[];
+#endif
+
     // Value for KEY_ZOOM_SUPPORTED or KEY_SMOOTH_ZOOM_SUPPORTED.
     static const char TRUE[];
     static const char FALSE[];
