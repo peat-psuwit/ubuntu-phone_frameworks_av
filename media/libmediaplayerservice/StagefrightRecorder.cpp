@@ -96,6 +96,21 @@ sp<IGraphicBufferProducer> StagefrightRecorder::querySurfaceMediaSource() const 
     return mSurfaceMediaSource->getBufferQueue();
 }
 
+void StagefrightRecorder::onReadAudioCb(void *context)
+{
+    ALOGV("onReadAudioCb");
+    if (context != NULL) {
+        StagefrightRecorder *sr = static_cast<StagefrightRecorder*>(context);
+        sr->onReadAudio();
+    }
+}
+
+void StagefrightRecorder::onReadAudio()
+{
+    ALOGV("onReadAudio");
+    mListener->readAudio();
+}
+
 status_t StagefrightRecorder::setAudioSource(audio_source_t as) {
     ALOGV("setAudioSource: %d", as);
     if (as < AUDIO_SOURCE_DEFAULT ||
@@ -727,6 +742,7 @@ status_t StagefrightRecorder::setParameters(const String8 &params) {
 }
 
 status_t StagefrightRecorder::setListener(const sp<IMediaRecorderClient> &listener) {
+    ALOGD("setListener");
     mListener = listener;
 
     return OK;
@@ -811,11 +827,17 @@ sp<MediaSource> StagefrightRecorder::createAudioSource() {
                 mAudioChannels);
 
     status_t err = audioSource->initCheck();
-
     if (err != OK) {
         ALOGE("audio source is not initialized");
         return NULL;
     }
+
+    if (audioSource != 0) {
+        audioSource->setListener(mListener);
+        audioSource->setReadAudioCb(&StagefrightRecorder::onReadAudioCb, this);
+    }
+    else
+        ALOGW("Can't call AudioSource::setListener since audioSource is NULL");
 
     sp<MetaData> encMeta = new MetaData;
     const char *mime;
@@ -1531,15 +1553,11 @@ status_t StagefrightRecorder::setupMPEG4Recording(
     // Audio source is added at the end if it exists.
     // This help make sure that the "recoding" sound is suppressed for
     // camcorder applications in the recorded files.
-    // TODO: Disable instantiating the audio encoder until we can successfully
-    // use PulseAudio for getting the mic input
-#if 0
     if (!mCaptureTimeLapse && (mAudioSource != AUDIO_SOURCE_CNT)) {
         err = setupAudioEncoder(writer);
         if (err != OK) return err;
         *totalBitRate += mAudioBitRate;
     }
-#endif
 
     if (mInterleaveDurationUs > 0) {
         reinterpret_cast<MPEG4Writer *>(writer.get())->
@@ -1580,6 +1598,7 @@ void StagefrightRecorder::setupMPEG4MetaData(int64_t startTimeUs, int32_t totalB
         (*meta)->setInt64(kKeyTrackTimeStatus, mTrackEveryTimeDurationUs);
     }
     if (mRotationDegrees != 0) {
+        ALOGV("Setting rotation degrees to be %d", mRotationDegrees);
         (*meta)->setInt32(kKeyRotation, mRotationDegrees);
     }
 }

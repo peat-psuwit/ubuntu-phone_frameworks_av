@@ -21,6 +21,7 @@
 #include <binder/IServiceManager.h>
 #include <media/AudioSystem.h>
 #include <media/IAudioFlinger.h>
+#include <camera_record_service.h>
 #include <media/IAudioPolicyService.h>
 #include <math.h>
 
@@ -33,6 +34,7 @@ namespace android {
 // client singleton for AudioFlinger binder interface
 Mutex AudioSystem::gLock;
 sp<IAudioFlinger> AudioSystem::gAudioFlinger;
+sp<ICameraRecordService> AudioSystem::gCameraRecord;
 sp<AudioSystem::AudioFlingerClient> AudioSystem::gAudioFlingerClient;
 audio_error_callback AudioSystem::gAudioErrorCallback = NULL;
 // Cached values
@@ -49,6 +51,7 @@ size_t AudioSystem::gInBuffSize = 0;
 // establish binder interface to AudioFlinger service
 const sp<IAudioFlinger>& AudioSystem::get_audio_flinger()
 {
+    ALOGV("%s", __PRETTY_FUNCTION__);
     Mutex::Autolock _l(gLock);
     if (gAudioFlinger == 0) {
         sp<IServiceManager> sm = defaultServiceManager();
@@ -76,8 +79,30 @@ const sp<IAudioFlinger>& AudioSystem::get_audio_flinger()
     return gAudioFlinger;
 }
 
+const sp<ICameraRecordService>& AudioSystem::get_camera_record_service()
+{
+    Mutex::Autolock _l(gLock);
+    if (gCameraRecord == 0) {
+        sp<IServiceManager> sm = defaultServiceManager();
+        sp<IBinder> binder;
+        do {
+            // Connect to the CameraRecordService service
+            binder = sm->getService(String16(CameraRecordService::exported_service_name()));
+            if (binder != 0)
+                break;
+            ALOGW("CameraRecordService not published, waiting...");
+            usleep(500000); // 0.5 s
+        } while (true);
+        gCameraRecord = interface_cast<ICameraRecordService>(binder);
+    }
+    ALOGE_IF(gCameraRecord==0, "no CameraRecordService!?");
+
+    return gCameraRecord;
+}
+
 /* static */ status_t AudioSystem::checkAudioFlinger()
 {
+    ALOGV("%s", __PRETTY_FUNCTION__);
     if (defaultServiceManager()->checkService(String16("media.audio_flinger")) != 0) {
         return NO_ERROR;
     }
@@ -335,20 +360,72 @@ status_t AudioSystem::getLatency(audio_io_handle_t output,
     return NO_ERROR;
 }
 
+static int check_input_parameters(uint32_t sample_rate,
+                                  audio_format_t format,
+                                  int channel_count)
+{
+    if (format != AUDIO_FORMAT_PCM_16_BIT) return -EINVAL;
+
+    if ((channel_count < 1) || (channel_count > 2)) return -EINVAL;
+
+    switch (sample_rate) {
+    case 8000:
+    case 11025:
+    case 12000:
+    case 16000:
+    case 22050:
+    case 24000:
+    case 32000:
+    case 44100:
+    case 48000:
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+#define AUDIO_CAPTURE_PERIOD_DURATION_MSEC 20
+/* Pulled in from hardware/qcom/audio/hal/audio_hw.c
+TODO: This should be further made generic for different
+      device types
+*/
+static size_t get_input_buffer_size(uint32_t sample_rate,
+                                    audio_format_t format,
+                                    int channel_count)
+{
+    ALOGV("%s", __PRETTY_FUNCTION__);
+    size_t size = 0;
+
+    if (check_input_parameters(sample_rate, format, channel_count) != 0)
+        return 0;
+
+    ALOGV("Checked the input params");
+    size = (sample_rate * AUDIO_CAPTURE_PERIOD_DURATION_MSEC) / 1000;
+    /* ToDo: should use frame_size computed based on the format and
+       channel_count here. */
+    size *= sizeof(short) * channel_count;
+
+    /* make sure the size is multiple of 64 */
+    size += 0x3f;
+    size &= ~0x3f;
+
+    return size;
+}
+
 status_t AudioSystem::getInputBufferSize(uint32_t sampleRate, audio_format_t format,
         audio_channel_mask_t channelMask, size_t* buffSize)
 {
+    ALOGV("%s", __PRETTY_FUNCTION__);
     gLock.lock();
     // Do we have a stale gInBufferSize or are we requesting the input buffer size for new values
     size_t inBuffSize = gInBuffSize;
     if ((inBuffSize == 0) || (sampleRate != gPrevInSamplingRate) || (format != gPrevInFormat)
         || (channelMask != gPrevInChannelMask)) {
         gLock.unlock();
-        const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
-        if (af == 0) {
-            return PERMISSION_DENIED;
-        }
-        inBuffSize = af->getInputBufferSize(sampleRate, format, channelMask);
+        inBuffSize = get_input_buffer_size(sampleRate, format, popcount(channelMask));
+        ALOGV("%s: %ld", __PRETTY_FUNCTION__, inBuffSize);
         gLock.lock();
         // save the request params
         gPrevInSamplingRate = sampleRate;
@@ -388,19 +465,15 @@ status_t AudioSystem::getRenderPosition(audio_io_handle_t output, size_t *halFra
 }
 
 size_t AudioSystem::getInputFramesLost(audio_io_handle_t ioHandle) {
-    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    ALOGV("%s: always returning 0", __PRETTY_FUNCTION__);
     unsigned int result = 0;
-    if (af == 0) return result;
-    if (ioHandle == 0) return result;
-
-    result = af->getInputFramesLost(ioHandle);
     return result;
 }
 
-int AudioSystem::newAudioSessionId() {
-    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
-    if (af == 0) return 0;
-    return af->newAudioSessionId();
+volatile int32_t AudioSystem::mNextUniqueId = 1;
+
+int32_t AudioSystem::newAudioSessionId() {
+    return android_atomic_inc(&mNextUniqueId);
 }
 
 void AudioSystem::acquireAudioSessionId(int audioSession) {
@@ -639,9 +712,8 @@ audio_io_handle_t AudioSystem::getInput(audio_source_t inputSource,
                                     audio_channel_mask_t channelMask,
                                     int sessionId)
 {
-    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
-    if (aps == 0) return 0;
-    return aps->getInput(inputSource, samplingRate, format, channelMask, sessionId);
+    ALOGV("Returning a static audio_io_handle_t == 1");
+    return 1;
 }
 
 status_t AudioSystem::startInput(audio_io_handle_t input)

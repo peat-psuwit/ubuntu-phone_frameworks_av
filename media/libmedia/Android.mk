@@ -22,7 +22,10 @@ LOCAL_SRC_FILES:= \
     IDrm.cpp \
     IDrmClient.cpp \
     IHDCP.cpp \
-    AudioRecord.cpp \
+    ../../../../ubuntu/libhybris/compat/media/record_thread.cpp \
+    ../../../../ubuntu/libhybris/compat/media/record_track.cpp \
+    ../../../../ubuntu/libhybris/compat/media/camera_record_service.cpp \
+    AudioRecordHybris.cpp \
     AudioSystem.cpp \
     mediaplayer.cpp \
     IMediaLogService.cpp \
@@ -78,6 +81,8 @@ LOCAL_C_INCLUDES := \
     $(TOP)/frameworks/native/include/media/openmax \
     external/icu4c/common \
     $(call include-path-for, audio-effects) \
-    $(call include-path-for, audio-utils)
+    $(call include-path-for, audio-utils) \
+    $(TOP)/ubuntu/libhybris/hybris/include \
+    $(TOP)/ubuntu/libhybris/compat/media
 
 include $(BUILD_SHARED_LIBRARY)
