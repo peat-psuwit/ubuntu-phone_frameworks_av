@@ -33,7 +33,9 @@
 #include <media/AudioSystem.h>
 #include <media/mediaplayer.h>
 #include <utils/Errors.h>
+#include <utils/KeyedVector.h>
 #include <utils/Log.h>
+#include <utils/Looper.h>
 #include <utils/String16.h>
 
 #include "CameraService.h"
@@ -43,6 +45,202 @@
 #include "api2/CameraDeviceClient.h"
 #include "utils/CameraTraces.h"
 #include "CameraDeviceFactory.h"
+
+#include <stdint.h>
+
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/un.h>
+
+namespace
+{
+// Please see lp:trust-store and
+//   http://bazaar.launchpad.net/~thomas-voss/trust-store/add-trust-stored/view/head:/tests/remote_agent_test.cpp#L538
+// for a test-case illustrating the setup and the "other side" we
+// are talking to here.
+struct TrustAgentRegistry : public android::Thread,
+                            public android::LooperCallback
+{
+    // The request we sent out via a socket to a remote agent.
+    struct Request
+    {
+        uid_t uid; pid_t pid; ::uint64_t feature; ::int64_t startTime;
+    };
+
+    enum Answer
+    {
+        denied = 0,
+        granted = 1
+    };
+
+    TrustAgentRegistry(const char* endpoint)
+            : android::Thread(false),
+              looper(new android::Looper(false))
+    {
+        static const int socketErrorCode = -1;
+
+        // We create a unix domain socket
+        socketFd = ::socket(PF_UNIX, SOCK_STREAM, 0);
+
+        if (socketFd == socketErrorCode)
+        {
+            ALOGE("Could not create unix stream socket");
+            return;
+        }
+
+        // Prepare for binding to endpoint in file system.
+        // Consciously ignoring errors here.
+        ::unlink(endpoint);
+
+        // Setup address
+        sockaddr_un address;
+        ::memset(&address, 0, sizeof(sockaddr_un));
+
+        address.sun_family = AF_UNIX;
+        ::strncpy(address.sun_path, endpoint, 108);
+
+        // And bind to the endpoint in the filesystem.
+        static const int bindErrorCode = -1;
+        int rc = ::bind(socketFd, reinterpret_cast<sockaddr*>(&address), sizeof(sockaddr_un));        
+
+        if (rc == bindErrorCode)
+        {
+            ALOGE("Could not bind to endpoint");
+            return;
+        }
+
+        // Ensure correct permissions
+        static const int chmodErrorCode = -1;
+        rc = ::chmod(endpoint, S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP);
+
+        if (rc == chmodErrorCode)
+        {
+            ALOGE("Could not adjust permissions of endpoint");
+            return;
+        }
+
+        // Start listening for incoming connections.
+        static const int listenErrorCode = -1;
+        static const int backLogSize = 5;
+
+        rc = ::listen(socketFd, backLogSize);
+
+        if (rc == listenErrorCode)
+        {
+            ALOGE("Could not start listening for incoming connections");
+            return;
+        }
+
+        looper->addFd(socketFd,
+                      ALOOPER_POLL_CALLBACK,
+                      ALOOPER_EVENT_INPUT |
+                      ALOOPER_EVENT_ERROR |
+                      ALOOPER_EVENT_INVALID,
+                      android::sp<android::LooperCallback>(this),
+                      NULL);
+
+        run("TrustAgentRegistry");
+    }
+
+    ~TrustAgentRegistry()
+    {
+        looper->removeFd(socketFd);
+        requestExitAndWait();
+    }
+
+    // From android::LooperCallback
+    int handleEvent(int fd, int events, void*)
+    {
+        static const int keepOn = 1;
+        static const int bailOut = 0;
+
+        if (fd != socketFd)
+            return keepOn;
+
+        if (events & ALOOPER_EVENT_ERROR)
+            return bailOut;
+
+        if (events & ALOOPER_EVENT_INVALID)
+            return bailOut;
+
+        // Error code when accepting connections.
+        static const int acceptErrorCode = -1;
+
+        // Error code when querying socket options.
+        static const int getSockOptError = -1;
+        // Some state we preserve across loop iterations.
+        sockaddr_un address;
+        socklen_t addressLength = sizeof(sockaddr_un);
+
+        ucred peerCredentials; ::memset(&peerCredentials, 0, sizeof(ucred));
+        socklen_t len = sizeof(peerCredentials);
+
+        int connectionFd = ::accept(socketFd, reinterpret_cast<sockaddr*>(&address), &addressLength);
+
+        if (connectionFd == acceptErrorCode)
+            return keepOn;
+
+        // We query the peer credentials
+        len = sizeof(ucred);
+        int rc = ::getsockopt(connectionFd, SOL_SOCKET, SO_PEERCRED, &peerCredentials, &len);
+        if (rc == getSockOptError)
+        {
+            ALOGE("Could not query peer credentials");
+        } else
+        {
+            android::AutoMutex am(remoteAgentsGuard);
+            remoteAgents.add(peerCredentials.uid, connectionFd);
+        }
+
+        return keepOn;
+    }
+
+    // From android::Thread
+    bool threadLoop()
+    {
+        static const int timeoutInMs = 5000;
+
+        looper->pollOnce(timeoutInMs);
+
+        return exitPending();
+    }
+
+    bool verifyConnectRequestFor(uid_t uid, pid_t pid)
+    {
+        int socket = -1;
+
+        // Scoping access to the known remoteAgents here.
+        {
+            android::AutoMutex am(remoteAgentsGuard);
+            ssize_t idx = remoteAgents.indexOfKey(uid);
+            if (idx == -1)
+                return false;
+
+            socket = remoteAgents.keyAt(idx);
+        }
+
+        Request request; request.uid = uid; request.pid = pid; request.feature = 0; request.startTime = -1;
+
+        if (::write(socket, &request, sizeof(Request)) == -1)
+            return false;
+
+        int32_t answerFromSocket = denied;
+
+        if (::read(socket, &answerFromSocket, sizeof(::int32_t)) == -1)
+            return false;
+
+        return answerFromSocket == granted;
+    }
+
+    int socketFd;
+    android::sp<android::Looper> looper;
+    android::Mutex remoteAgentsGuard;
+    android::KeyedVector<uid_t, int> remoteAgents;
+};
+
+android::sp<TrustAgentRegistry> trust_agent_registry(new TrustAgentRegistry("/dev/socket/camera_service/camera_service_to_trust"));
+}
 
 namespace android {
 
@@ -313,6 +511,12 @@ status_t CameraService::validateConnect(int cameraId,
 
     if (clientUid == USE_CALLING_UID) {
         clientUid = getCallingUid();
+
+        // We try to reach out to a remote trust store instance to
+        // verify that the app with uid and pid is allowed to access the
+        // camera.
+        if (!trust_agent_registry->verifyConnectRequestFor(clientUid, callingPid))
+            return PERMISSION_DENIED;
     } else {
         // We only trust our own process to forward client UIDs
         if (callingPid != getpid()) {
