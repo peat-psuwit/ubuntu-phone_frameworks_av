@@ -27,7 +27,7 @@
 #include <utils/Log.h>
 #include <private/media/AudioTrackShared.h>
 #include <media/IAudioFlinger.h>
-#include <camera_record_service.h>
+#include <media/camera_record_service.h>
 
 #define WAIT_PERIOD_MS          10
 

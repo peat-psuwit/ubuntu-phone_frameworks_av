@@ -21,7 +21,7 @@
 #include <binder/IServiceManager.h>
 #include <media/AudioSystem.h>
 #include <media/IAudioFlinger.h>
-#include <camera_record_service.h>
+#include <media/camera_record_service.h>
 #include <media/IAudioPolicyService.h>
 #include <math.h>
 
