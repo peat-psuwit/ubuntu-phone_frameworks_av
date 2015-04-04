@@ -53,7 +53,7 @@ const sp<IAudioFlinger>& AudioSystem::get_audio_flinger()
 {
     ALOGV("%s", __PRETTY_FUNCTION__);
     Mutex::Autolock _l(gLock);
-    if (gAudioFlinger == 0) {
+ /* if (gAudioFlinger == 0) {
         sp<IServiceManager> sm = defaultServiceManager();
         sp<IBinder> binder;
         do {
@@ -73,7 +73,7 @@ const sp<IAudioFlinger>& AudioSystem::get_audio_flinger()
         binder->linkToDeath(gAudioFlingerClient);
         gAudioFlinger = interface_cast<IAudioFlinger>(binder);
         gAudioFlinger->registerClient(gAudioFlingerClient);
-    }
+    } */
     ALOGE_IF(gAudioFlinger==0, "no AudioFlinger!?");
 
     return gAudioFlinger;
