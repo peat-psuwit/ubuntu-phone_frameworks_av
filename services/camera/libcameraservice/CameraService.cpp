@@ -19,6 +19,8 @@
 //#define LOG_NDEBUG 0
 
 #include <stdio.h>
+#include <errno.h>
+#include <string.h>
 #include <sys/types.h>
 #include <pthread.h>
 
@@ -102,7 +104,7 @@ struct TrustAgentRegistry : public android::Thread,
 
         // And bind to the endpoint in the filesystem.
         static const int bindErrorCode = -1;
-        int rc = ::bind(socketFd, reinterpret_cast<sockaddr*>(&address), sizeof(sockaddr_un));        
+        int rc = ::bind(socketFd, reinterpret_cast<sockaddr*>(&address), sizeof(sockaddr_un));
 
         if (rc == bindErrorCode)
         {
@@ -155,6 +157,8 @@ struct TrustAgentRegistry : public android::Thread,
         static const int keepOn = 1;
         static const int bailOut = 0;
 
+        ALOGD("%s", __PRETTY_FUNCTION__);
+
         if (fd != socketFd)
             return keepOn;
 
@@ -189,6 +193,7 @@ struct TrustAgentRegistry : public android::Thread,
             ALOGE("Could not query peer credentials");
         } else
         {
+            ALOGD("%s adding uid %d fd %d", __PRETTY_FUNCTION__, peerCredentials.uid, connectionFd);
             android::AutoMutex am(remoteAgentsGuard);
             remoteAgents.add(peerCredentials.uid, connectionFd);
         }
@@ -199,9 +204,17 @@ struct TrustAgentRegistry : public android::Thread,
     // From android::Thread
     bool threadLoop()
     {
-        static const int timeoutInMs = 5000;
+        static const int timeoutInMs = -1;
+        int res;
 
-        looper->pollOnce(timeoutInMs);
+        ALOGD("%s start", __PRETTY_FUNCTION__);
+
+        do {
+            res = looper->pollOnce(timeoutInMs);
+            ALOGD("%s res %d", __PRETTY_FUNCTION__, res);
+        } while(res != ALOOPER_POLL_ERROR);
+
+        ALOGD("%s exit", __PRETTY_FUNCTION__);
 
         return exitPending();
     }
@@ -210,25 +223,35 @@ struct TrustAgentRegistry : public android::Thread,
     {
         int socket = -1;
 
+        ALOGD("%s uid %d pid %d", __PRETTY_FUNCTION__, uid, pid);
+
         // Scoping access to the known remoteAgents here.
         {
             android::AutoMutex am(remoteAgentsGuard);
             ssize_t idx = remoteAgents.indexOfKey(uid);
-            if (idx == -1)
+            if (idx < 0) {
+                ALOGE("No trust store connection found for user %d", uid);
                 return false;
+            }
 
-            socket = remoteAgents.keyAt(idx);
+            socket = remoteAgents[idx];
         }
 
         Request request; request.uid = uid; request.pid = pid; request.feature = 0; request.startTime = -1;
 
-        if (::write(socket, &request, sizeof(Request)) == -1)
+        if (::write(socket, &request, sizeof(Request)) == -1) {
+            ALOGE("%s write error: %s (%d)", __PRETTY_FUNCTION__, strerror(errno), errno);
             return false;
+        }
 
         int32_t answerFromSocket = denied;
 
-        if (::read(socket, &answerFromSocket, sizeof(::int32_t)) == -1)
+        if (::read(socket, &answerFromSocket, sizeof(::int32_t)) == -1) {
+            ALOGE("%s read error: %s (%d)", __PRETTY_FUNCTION__, strerror(errno), errno);
             return false;
+        }
+
+        ALOGD("%s answerFromSocket %d", __PRETTY_FUNCTION__, answerFromSocket);
 
         return answerFromSocket == granted;
     }
